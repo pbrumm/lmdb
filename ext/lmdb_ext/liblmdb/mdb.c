@@ -1830,6 +1830,53 @@ mdb_dlist_free(MDB_txn *txn)
 	dl[0].mid = 0;
 }
 
+#ifdef MDB_VL32
+static void
+mdb_page_unref(MDB_txn *txn, MDB_page *mp)
+{
+	pgno_t pgno;
+	MDB_ID3L tl = txn->mt_rpages;
+	unsigned x, rem;
+	if (mp->mp_flags & (P_SUBP|P_DIRTY))
+		return;
+	rem = mp->mp_pgno & (MDB_RPAGE_CHUNK-1);
+	pgno = mp->mp_pgno ^ rem;
+	x = mdb_mid3l_search(tl, pgno);
+	if (x != tl[0].mid && tl[x+1].mid == mp->mp_pgno)
+		x++;
+	if (tl[x].mref)
+		tl[x].mref--;
+}
+#define MDB_PAGE_UNREF(txn, mp)	mdb_page_unref(txn, mp)
+
+static void
+mdb_cursor_unref(MDB_cursor *mc)
+{
+	int i;
+	if (mc->mc_txn->mt_rpages[0].mid) {
+		if (!mc->mc_snum || !mc->mc_pg[0] || IS_SUBP(mc->mc_pg[0]))
+			return;
+		for (i=0; i<mc->mc_snum; i++)
+			mdb_page_unref(mc->mc_txn, mc->mc_pg[i]);
+		if (mc->mc_ovpg) {
+			mdb_page_unref(mc->mc_txn, mc->mc_ovpg);
+			mc->mc_ovpg = 0;
+		}
+	}
+	mc->mc_snum = mc->mc_top = 0;
+	mc->mc_pg[0] = NULL;
+	mc->mc_flags &= ~C_INITIALIZED;
+}
+#define MDB_CURSOR_UNREF(mc, force) \
+	(((force) || ((mc)->mc_flags & C_INITIALIZED)) \
+	 ? mdb_cursor_unref(mc) \
+	 : (void)0)
+
+#else
+#define MDB_PAGE_UNREF(txn, mp)
+#define MDB_CURSOR_UNREF(mc, force) ((void)0)
+#endif /* MDB_VL32 */
+
 /** Loosen or free a single page.
  * Saves single pages to a list for future reuse
  * in this same txn. It has been pulled from the freeDB
